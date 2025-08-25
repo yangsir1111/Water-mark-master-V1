@@ -1,0 +1,1808 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>水印大师 - 批量图片水印工具</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        .upload-area {
+            border: 2px dashed #d1d5db;
+            border-radius: 0.75rem;
+            padding: 2rem;
+            text-align: center;
+            transition: all 0.2s;
+        }
+        .upload-area:hover {
+            border-color: #3b82f6;
+        }
+        .upload-area.active {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+        .btn-primary {
+            background-color: #2563eb;
+            color: white;
+            padding: 0.5rem 1.5rem;
+            border-radius: 0.5rem;
+            border: none;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .btn-primary:hover {
+            background-color: #1d4ed8;
+        }
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .slider {
+            width: 100%;
+            height: 6px;
+            border-radius: 5px;
+            background: #d1d5db;
+            outline: none;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #2563eb;
+            cursor: pointer;
+        }
+        .slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #2563eb;
+            cursor: pointer;
+            border: none;
+        }
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background-color: rgba(0, 0, 0, 0.75);
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-content {
+            position: relative;
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+            max-width: 64rem;
+            max-height: 90vh;
+            width: 100%;
+            margin: 1rem;
+            display: flex;
+            flex-direction: column;
+        }
+        .clickable-image {
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .clickable-image:hover {
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useCallback } = React;
+
+        // Zip Download Utility Functions
+        const downloadImagesAsZip = async (processedImages, zipFileName = 'watermarked_images.zip') => {
+            try {
+                const validImages = processedImages.filter(image => image.url && !image.error);
+                
+                if (validImages.length === 0) {
+                    throw new Error('没有可下载的图片');
+                }
+
+                const zip = new JSZip();
+                
+                for (let i = 0; i < validImages.length; i++) {
+                    const image = validImages[i];
+                    try {
+                        const response = await fetch(image.url);
+                        if (!response.ok) {
+                            console.warn(`Failed to fetch image: ${image.originalName}`);
+                            continue;
+                        }
+                        
+                        const blob = await response.blob();
+                        const fileName = `watermarked_${image.originalName}` || `watermarked_image_${i + 1}.png`;
+                        zip.file(fileName, blob);
+                    } catch (error) {
+                        console.warn(`Error processing image ${image.originalName}:`, error);
+                    }
+                }
+                
+                const zipBlob = await zip.generateAsync({ 
+                    type: 'blob',
+                    compression: 'DEFLATE',
+                    compressionOptions: {
+                        level: 6
+                    }
+                });
+                
+                const url = URL.createObjectURL(zipBlob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = zipFileName;
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                setTimeout(() => {
+                    URL.revokeObjectURL(url);
+                }, 1000);
+                
+                return {
+                    success: true,
+                    message: `成功打包 ${validImages.length} 张图片`,
+                    count: validImages.length
+                };
+                
+            } catch (error) {
+                console.error('Error creating zip file:', error);
+                throw new Error(`打包失败: ${error.message}`);
+            }
+        };
+
+        const confirmBatchDownload = (imageCount) => {
+            return window.confirm(
+                `准备下载 ${imageCount} 张已处理的图片为ZIP文件。\n\n点击确定开始下载，文件将保存到您的默认下载文件夹。`
+            );
+        };
+
+        const showDownloadComplete = (imageCount) => {
+            const notification = document.createElement('div');
+            notification.innerHTML = `
+                <div style="
+                    position: fixed;
+                    top: 20px;
+                    right: 20px;
+                    background: #10b981;
+                    color: white;
+                    padding: 12px 20px;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+                    z-index: 1000;
+                    font-family: system-ui, -apple-system, sans-serif;
+                    font-size: 14px;
+                    font-weight: 500;
+                ">
+                    ✓ ZIP文件下载已开始！已打包 ${imageCount} 张图片
+                </div>
+            `;
+            
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.parentNode.removeChild(notification);
+                }
+            }, 3000);
+        };
+
+        // FileUpload Component
+        const FileUpload = ({ onFilesSelected, selectedFiles }) => {
+            const [isDragOver, setIsDragOver] = useState(false);
+
+            const handleDragOver = useCallback((e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragOver(true);
+            }, []);
+
+            const handleDragLeave = useCallback((e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                // Only set dragOver to false if we're actually leaving the drop zone
+                if (!e.currentTarget.contains(e.relatedTarget)) {
+                    setIsDragOver(false);
+                }
+            }, []);
+
+            const handleDragEnter = useCallback((e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragOver(true);
+            }, []);
+
+            const handleDrop = useCallback((e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragOver(false);
+                
+                const files = Array.from(e.dataTransfer.files).filter(file =>
+                    file.type.startsWith('image/')
+                );
+                
+                if (files.length > 0) {
+                    onFilesSelected(files);
+                } else if (e.dataTransfer.files.length > 0) {
+                    // Show message if files were dropped but none were valid images
+                    alert(`拖放了 ${e.dataTransfer.files.length} 个文件，但没有有效的图片文件。请选择 JPG、PNG 或 WebP 格式的图片。`);
+                }
+            }, [onFilesSelected]);
+
+            const handleFileSelect = useCallback((e) => {
+                const files = Array.from(e.target.files);
+                if (files.length > 0) {
+                    onFilesSelected(files);
+                }
+            }, [onFilesSelected]);
+
+            const removeFile = useCallback((index) => {
+                const newFiles = selectedFiles.filter((_, i) => i !== index);
+                onFilesSelected(newFiles);
+            }, [selectedFiles, onFilesSelected]);
+
+            return React.createElement('div', { className: 'space-y-4' },
+                React.createElement('div', {
+                    className: `upload-area ${isDragOver ? 'active' : ''}`,
+                    onDragOver: handleDragOver,
+                    onDragEnter: handleDragEnter,
+                    onDragLeave: handleDragLeave,
+                    onDrop: handleDrop
+                },
+                    React.createElement('div', { className: 'text-4xl mb-4' }, '📁'),
+                    React.createElement('h3', { className: 'text-lg font-semibold text-gray-700 mb-2' }, '拖拽图片到此处'),
+                    React.createElement('p', { className: 'text-gray-500 mb-4' }, '或点击下方按钮选择文件'),
+                    React.createElement('label', { className: 'btn-primary cursor-pointer inline-block' },
+                        React.createElement('input', {
+                            type: 'file',
+                            multiple: true,
+                            accept: 'image/*',
+                            onChange: handleFileSelect,
+                            style: { display: 'none' }
+                        }),
+                        '选择图片文件'
+                    ),
+                    React.createElement('p', { className: 'text-xs text-gray-400 mt-2' }, '支持 JPG、PNG、WebP 格式')
+                ),
+                selectedFiles.length > 0 && React.createElement('div', { className: 'space-y-2' },
+                    React.createElement('h4', { className: 'text-sm font-medium text-gray-700' }, `已选择 ${selectedFiles.length} 个文件`),
+                    React.createElement('div', { className: 'grid grid-cols-1 gap-2' },
+                        selectedFiles.map((file, index) =>
+                            React.createElement('div', { key: index, className: 'flex items-center p-3 bg-white rounded border' },
+                                React.createElement('span', { className: 'text-2xl mr-3' }, '🖼️'),
+                                React.createElement('div', { className: 'flex-1' },
+                                    React.createElement('p', { className: 'text-sm font-medium truncate' }, file.name),
+                                    React.createElement('p', { className: 'text-xs text-gray-500' }, (file.size / 1024).toFixed(1) + ' KB')
+                                ),
+                                React.createElement('button', {
+                                    onClick: () => removeFile(index),
+                                    className: 'text-red-500 hover:text-red-700 ml-2'
+                                }, '✕')
+                            )
+                        )
+                    )
+                )
+            );
+        };
+
+        // WatermarkConfig Component with Logo Support
+        const WatermarkConfig = ({ config, onChange }) => {
+            const [logoUploadKey, setLogoUploadKey] = useState(0);
+            const [dragOver, setDragOver] = useState(false);
+            
+            const handleChange = (key, value) => {
+                onChange({
+                    ...config,
+                    [key]: value
+                });
+            };
+
+            const handleLogoDrop = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDragOver(false);
+                
+                const files = e.dataTransfer.files;
+                if (files && files.length > 0) {
+                    const file = files[0];
+                    // Check if it's an image file
+                    if (file.type.startsWith('image/')) {
+                        handleLogoUpload(file);
+                    } else {
+                        alert('请选择有效的图片文件');
+                    }
+                }
+            };
+
+            const handleLogoDragOver = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDragOver(true);
+            };
+
+            const handleLogoDragLeave = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                // Only set dragOver to false if we're actually leaving the drop zone
+                if (!e.currentTarget.contains(e.relatedTarget)) {
+                    setDragOver(false);
+                }
+            };
+
+            const handleLogoDragEnter = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setDragOver(true);
+            };
+
+            const handleLogoUpload = async (file) => {
+                if (!file) return;
+                
+                // Validate file size (5MB limit)
+                if (file.size > 5 * 1024 * 1024) {
+                    alert('Logo文件大小不能超过5MB，请选择更小的图片文件。');
+                    return;
+                }
+                
+                // Validate file type
+                if (!file.type.startsWith('image/')) {
+                    alert('请选择有效的图片文件（PNG、JPG、JPEG、SVG）。');
+                    return;
+                }
+                
+                // Validate image dimensions
+                const img = new Image();
+                img.onload = () => {
+                    if (img.width > 500 || img.height > 500) {
+                        alert('Logo图片尺寸不能超过500x500像素，请调整图片大小后重新上传。');
+                        return;
+                    }
+                    
+                    // Create logo object with preview URL
+                    const logoWithPreview = {
+                        name: file.name,
+                        size: file.size,
+                        type: file.type,
+                        previewUrl: URL.createObjectURL(file),
+                        originalFile: file
+                    };
+                    
+                    handleChange('logoFile', logoWithPreview);
+                    
+                    if (config.watermarkType === 'text') {
+                        handleChange('watermarkType', 'logo');
+                    }
+                };
+                
+                img.onerror = () => {
+                    alert('无法读取图片文件，请确认文件格式正确。');
+                };
+                
+                img.src = URL.createObjectURL(file);
+            };
+
+            const handleLogoFileSelect = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    handleLogoUpload(file);
+                }
+            };
+
+            const removeLogo = () => {
+                if (config.logoFile && config.logoFile.previewUrl) {
+                    URL.revokeObjectURL(config.logoFile.previewUrl);
+                }
+                
+                handleChange('logoFile', null);
+                
+                // Force re-render of the upload area by changing the key
+                setLogoUploadKey(prev => prev + 1);
+                
+                // Do NOT change watermark type - stay in current mode and show upload area
+                // This allows users to upload a new logo without mode switching
+            };
+
+            const positions = [
+                { value: 'top-left', label: '左上角' },
+                { value: 'top-right', label: '右上角' },
+                { value: 'bottom-left', label: '左下角' },
+                { value: 'bottom-right', label: '右下角' },
+                { value: 'center', label: '居中' }
+            ];
+
+            return React.createElement('div', { className: 'space-y-6' },
+                // Watermark Type Selector
+                React.createElement('div', null,
+                    React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, '水印类型'),
+                    React.createElement('div', { className: 'grid grid-cols-3 gap-2' },
+                        React.createElement('button', {
+                            onClick: () => handleChange('watermarkType', 'text'),
+                            className: `px-3 py-2 text-sm rounded border transition-colors ${
+                                config.watermarkType === 'text'
+                                    ? 'bg-blue-600 text-white border-blue-600'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                            }`
+                        }, '文字水印'),
+                        React.createElement('button', {
+                            onClick: () => handleChange('watermarkType', 'logo'),
+                            className: `px-3 py-2 text-sm rounded border transition-colors ${
+                                config.watermarkType === 'logo'
+                                    ? 'bg-blue-600 text-white border-blue-600'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                            }`
+                        }, 'Logo水印'),
+                        React.createElement('button', {
+                            onClick: () => handleChange('watermarkType', 'both'),
+                            className: `px-3 py-2 text-sm rounded border transition-colors ${
+                                config.watermarkType === 'both'
+                                    ? 'bg-blue-600 text-white border-blue-600'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                            }`
+                        }, '同时使用')
+                    )
+                ),
+                
+                // Logo Upload Section - Only show in logo mode
+                (config.watermarkType === 'logo' || config.watermarkType === 'both') &&
+                React.createElement('div', null,
+                    React.createElement('div', { className: 'flex items-center justify-between mb-2' },
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700' }, 'Logo水印上传')
+                    ),
+                    !config.logoFile ? 
+                        React.createElement('div', { 
+                            key: logoUploadKey,
+                            className: `border-2 border-dashed rounded p-4 text-center transition-colors ${
+                                dragOver ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-blue-400'
+                            }`,
+                            onDrop: handleLogoDrop,
+                            onDragOver: handleLogoDragOver,
+                            onDragEnter: handleLogoDragEnter,
+                            onDragLeave: handleLogoDragLeave
+                        },
+                            React.createElement('div', { className: 'text-4xl mb-2' }, '🖼️'),
+                            React.createElement('p', { className: 'text-sm text-gray-600 mb-2' }, '拖拽Logo图片到此处'),
+                            React.createElement('label', { className: 'bg-blue-600 text-white px-4 py-2 rounded text-sm cursor-pointer hover:bg-blue-700 transition-colors' },
+                                React.createElement('input', {
+                                    key: `logo-input-${logoUploadKey}`,
+                                    type: 'file',
+                                    accept: 'image/*',
+                                    onChange: handleLogoFileSelect,
+                                    style: { display: 'none' },
+                                    value: ''
+                                }),
+                                '选择Logo文件'
+                            ),
+                            React.createElement('p', { className: 'text-xs text-gray-400 mt-2' }, '支持 PNG、JPG、SVG 格式'),
+                            React.createElement('p', { className: 'text-xs text-gray-400' }, '文件大小不超过5MB，尺寸不超过500x500px')
+                        ) :
+                        React.createElement('div', { className: 'border border-gray-300 rounded p-4' },
+                            React.createElement('div', { className: 'flex items-center justify-between mb-2' },
+                                React.createElement('div', { className: 'flex items-center space-x-2' },
+                                    React.createElement('span', null, '🖼️'),
+                                    React.createElement('span', { className: 'text-sm font-medium' }, config.logoFile.name),
+                                    React.createElement('span', { className: 'text-xs text-gray-500' }, 
+                                        `(${(config.logoFile.size / 1024).toFixed(1)}KB)`
+                                    )
+                                ),
+                                React.createElement('button', {
+                                    onClick: removeLogo,
+                                    className: 'text-red-500 hover:text-red-700'
+                                }, '✕')
+                            ),
+                            React.createElement('div', { className: 'w-full h-16 bg-gray-100 rounded flex items-center justify-center overflow-hidden' },
+                                React.createElement('img', {
+                                    key: `logo-preview-${config.logoFile.name}-${logoUploadKey}`,
+                                    src: config.logoFile.previewUrl || URL.createObjectURL(config.logoFile),
+                                    alt: 'Logo preview',
+                                    className: 'max-h-full max-w-full object-contain',
+                                    onError: (e) => {
+                                        console.warn('Logo preview failed to load for:', config.logoFile.name);
+                                        e.target.style.display = 'none';
+                                        const fallbackDiv = e.target.parentNode.querySelector('.fallback-text');
+                                        if (fallbackDiv) {
+                                            fallbackDiv.style.display = 'block';
+                                        }
+                                    },
+                                    onLoad: (e) => {
+                                        // Hide fallback text when image loads successfully
+                                        const fallbackDiv = e.target.parentNode.querySelector('.fallback-text');
+                                        if (fallbackDiv) {
+                                            fallbackDiv.style.display = 'none';
+                                        }
+                                    }
+                                }),
+                                React.createElement('div', {
+                                    className: 'fallback-text text-gray-400 text-sm',
+                                    style: { display: 'none' }
+                                }, '预览失败')
+                            )
+                        )
+                ),
+                
+                // Logo Configuration - Only show when logo is selected
+                (config.watermarkType === 'logo' || config.watermarkType === 'both') && config.logoFile &&
+                React.createElement('div', { className: 'space-y-4 border-t border-gray-200 pt-4' },
+                    React.createElement('h4', { className: 'font-medium text-gray-700' }, 'Logo设置'),
+                    
+                    // Logo Size
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `Logo大小: ${config.logoSize}px`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '20',
+                            max: '800',
+                            value: config.logoSize,
+                            onChange: (e) => handleChange('logoSize', parseInt(e.target.value)),
+                            className: 'slider'
+                        })
+                    ),
+                    
+                    // Logo Opacity
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `Logo透明度: ${Math.round(config.logoOpacity * 100)}%`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '0.1',
+                            max: '1',
+                            step: '0.1',
+                            value: config.logoOpacity,
+                            onChange: (e) => handleChange('logoOpacity', parseFloat(e.target.value)),
+                            className: 'slider'
+                        })
+                    ),
+                    
+                    // Logo Position - Only show in single mode
+                    config.logoDistribution === 'single' && React.createElement('div', { className: 'space-y-4' },
+                        React.createElement('div', null,
+                            React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `Logo水平位置: ${Math.round(config.logoHorizontalPosition || 50)}%`),
+                            React.createElement('input', {
+                                type: 'range',
+                                min: '0',
+                                max: '100',
+                                step: '1',
+                                value: config.logoHorizontalPosition || 50,
+                                onChange: (e) => {
+                                    const value = parseInt(e.target.value);
+                                    console.log('Logo horizontal slider changed to:', value);
+                                    handleChange('logoHorizontalPosition', value);
+                                },
+                                className: 'slider'
+                            }),
+                            React.createElement('div', { className: 'flex justify-between text-xs text-gray-500 mt-1' },
+                                React.createElement('span', null, '左边缘 (0%)'),
+                                React.createElement('span', null, '中间 (50%)'),
+                                React.createElement('span', null, '右边缘 (100%)')
+                            )
+                        ),
+                        React.createElement('div', null,
+                            React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `Logo垂直位置: ${Math.round(config.logoVerticalPosition || 50)}%`),
+                            React.createElement('input', {
+                                type: 'range',
+                                min: '0',
+                                max: '100',
+                                step: '1',
+                                value: config.logoVerticalPosition || 50,
+                                onChange: (e) => {
+                                    const value = parseInt(e.target.value);
+                                    console.log('Logo vertical slider changed to:', value);
+                                    handleChange('logoVerticalPosition', value);
+                                },
+                                className: 'slider'
+                            }),
+                            React.createElement('div', { className: 'flex justify-between text-xs text-gray-500 mt-1' },
+                                React.createElement('span', null, '顶部 (0%)'),
+                                React.createElement('span', null, '中间 (50%)'),
+                                React.createElement('span', null, '底部 (100%)')
+                            )
+                        ),
+                        React.createElement('div', { className: 'text-xs text-gray-600 bg-blue-50 p-2 rounded' },
+                            React.createElement('p', { className: 'font-medium mb-1' }, '精确定位：'),
+                            React.createElement('p', null, '• 水平位置: 0%=左边缘, 50%=居中, 100%=右边缘'),
+                            React.createElement('p', null, '• 垂直位置: 0%=顶部, 50%=居中, 100%=底部'),
+                            React.createElement('p', null, '• Logo会自动调整以保持在图片范围内')
+                        )
+                    ),
+                    
+                    // Logo Rotation
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `Logo旋转: ${config.logoRotation}°`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '0',
+                            max: '360',
+                            value: config.logoRotation,
+                            onChange: (e) => handleChange('logoRotation', parseInt(e.target.value)),
+                            className: 'slider'
+                        })
+                    ),
+                    
+                    // Logo Distribution Mode
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, 'Logo分布模式'),
+                        React.createElement('div', { className: 'grid grid-cols-2 gap-2' },
+                            React.createElement('button', {
+                                onClick: () => handleChange('logoDistribution', 'single'),
+                                className: `px-3 py-2 text-sm rounded border transition-colors ${
+                                    config.logoDistribution === 'single'
+                                        ? 'bg-blue-600 text-white border-blue-600'
+                                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                                }`
+                            }, '单个Logo'),
+                            React.createElement('button', {
+                                onClick: () => handleChange('logoDistribution', 'multi'),
+                                className: `px-3 py-2 text-sm rounded border transition-colors ${
+                                    config.logoDistribution === 'multi'
+                                        ? 'bg-blue-600 text-white border-blue-600'
+                                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                                }`
+                            }, '多个Logo')
+                        ),
+                        React.createElement('p', { className: 'text-xs text-gray-500 mt-1' },
+                            '单个Logo：在指定位置显示一个Logo | 多个Logo：在整个图片上均匀分布Logo'
+                        )
+                    ),
+                    
+                    // Logo Spacing - Only show in multi mode
+                    config.logoDistribution === 'multi' && React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `Logo间距: ${config.logoSpacing}px`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '50',
+                            max: '500',
+                            value: config.logoSpacing,
+                            onChange: (e) => handleChange('logoSpacing', parseInt(e.target.value)),
+                            className: 'slider'
+                        }),
+                        React.createElement('p', { className: 'text-xs text-gray-500 mt-1' },
+                            '调整多个Logo之间的距离，值越小Logo密度越高'
+                        )
+                    )
+                ),
+                
+                // Text Configuration - Only show when text is selected
+                (config.watermarkType === 'text' || config.watermarkType === 'both') &&
+                React.createElement('div', { className: 'space-y-4 border-t border-gray-200 pt-4' },
+                    React.createElement('h4', { className: 'font-medium text-gray-700' }, '文字设置'),
+                    
+                    // Text input
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, '水印文字'),
+                        React.createElement('input', {
+                            type: 'text',
+                            value: config.text,
+                            onChange: (e) => handleChange('text', e.target.value),
+                            className: 'w-full px-3 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500',
+                            placeholder: '输入水印文字'
+                        })
+                    ),
+                    
+                    // Text Distribution Mode
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, '文字分布模式'),
+                        React.createElement('div', { className: 'grid grid-cols-2 gap-2' },
+                            React.createElement('button', {
+                                onClick: () => handleChange('textDistribution', 'single'),
+                                className: `px-3 py-2 text-sm rounded border transition-colors ${
+                                    config.textDistribution === 'single'
+                                        ? 'bg-blue-600 text-white border-blue-600'
+                                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                                }`
+                            }, '单个水印'),
+                            React.createElement('button', {
+                                onClick: () => handleChange('textDistribution', 'multi'),
+                                className: `px-3 py-2 text-sm rounded border transition-colors ${
+                                    config.textDistribution === 'multi'
+                                        ? 'bg-blue-600 text-white border-blue-600'
+                                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                                }`
+                            }, '多个水印')
+                        ),
+                        React.createElement('p', { className: 'text-xs text-gray-500 mt-1' },
+                            '单个水印：在指定位置显示一个水印 | 多个水印：在整个图片上均匀分布水印'
+                        )
+                    ),
+                    
+                    // Text Spacing - Only show in multi mode
+                    config.textDistribution === 'multi' && React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `文字间距: ${config.textSpacing}px`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '50',
+                            max: '1200',
+                            value: config.textSpacing,
+                            onChange: (e) => handleChange('textSpacing', parseInt(e.target.value)),
+                            className: 'slider'
+                        }),
+                        React.createElement('p', { className: 'text-xs text-gray-500 mt-1' },
+                            '调整水印文字之间的间距，间距越小水印越密集'
+                        )
+                    ),
+                    
+                    // Font Size
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `字体大小: ${config.fontSize}px`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '12',
+                            max: '300',
+                            value: config.fontSize,
+                            onChange: (e) => handleChange('fontSize', parseInt(e.target.value)),
+                            className: 'slider'
+                        })
+                    ),
+                    
+                    // Opacity
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `透明度: ${Math.round(config.opacity * 100)}%`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '0.1',
+                            max: '1',
+                            step: '0.1',
+                            value: config.opacity,
+                            onChange: (e) => handleChange('opacity', parseFloat(e.target.value)),
+                            className: 'slider'
+                        })
+                    ),
+                    
+                    // Text Position - Only show in single mode
+                    config.textDistribution === 'single' && React.createElement('div', { className: 'space-y-4' },
+                        React.createElement('div', null,
+                            React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `文字水平位置: ${Math.round(config.textHorizontalPosition || 50)}%`),
+                            React.createElement('input', {
+                                type: 'range',
+                                min: '0',
+                                max: '100',
+                                step: '1',
+                                value: config.textHorizontalPosition || 50,
+                                onChange: (e) => {
+                                    const value = parseInt(e.target.value);
+                                    console.log('Text horizontal slider changed to:', value);
+                                    handleChange('textHorizontalPosition', value);
+                                },
+                                className: 'slider'
+                            }),
+                            React.createElement('div', { className: 'flex justify-between text-xs text-gray-500 mt-1' },
+                                React.createElement('span', null, '左边缘 (0%)'),
+                                React.createElement('span', null, '中间 (50%)'),
+                                React.createElement('span', null, '右边缘 (100%)')
+                            )
+                        ),
+                        React.createElement('div', null,
+                            React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `文字垂直位置: ${Math.round(config.textVerticalPosition || 50)}%`),
+                            React.createElement('input', {
+                                type: 'range',
+                                min: '0',
+                                max: '100',
+                                step: '1',
+                                value: config.textVerticalPosition || 50,
+                                onChange: (e) => {
+                                    const value = parseInt(e.target.value);
+                                    console.log('Text vertical slider changed to:', value);
+                                    handleChange('textVerticalPosition', value);
+                                },
+                                className: 'slider'
+                            }),
+                            React.createElement('div', { className: 'flex justify-between text-xs text-gray-500 mt-1' },
+                                React.createElement('span', null, '顶部 (0%)'),
+                                React.createElement('span', null, '中间 (50%)'),
+                                React.createElement('span', null, '底部 (100%)')
+                            )
+                        ),
+                        React.createElement('div', { className: 'text-xs text-gray-600 bg-blue-50 p-2 rounded' },
+                            React.createElement('p', { className: 'font-medium mb-1' }, '精确定位：'),
+                            React.createElement('p', null, '• 水平位置: 0%=左边缘, 50%=居中, 100%=右边缘'),
+                            React.createElement('p', null, '• 垂直位置: 0%=顶部, 50%=居中, 100%=底部'),
+                            React.createElement('p', null, '• 水印会自动调整以保持在图片范围内')
+                        )
+                    ),
+                    
+                    // Color
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, '文字颜色'),
+                        React.createElement('div', { className: 'flex items-center space-x-3' },
+                            React.createElement('input', {
+                                type: 'color',
+                                value: config.color,
+                                onChange: (e) => handleChange('color', e.target.value),
+                                className: 'w-12 h-10 border rounded cursor-pointer'
+                            }),
+                            React.createElement('input', {
+                                type: 'text',
+                                value: config.color,
+                                onChange: (e) => handleChange('color', e.target.value),
+                                className: 'flex-1 px-3 py-2 border border-gray-300 rounded text-sm',
+                                placeholder: '#ffffff'
+                            })
+                        )
+                    ),
+                    
+                    // Text Rotation
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, `文字旋转: ${config.textRotation || 0}°`),
+                        React.createElement('input', {
+                            type: 'range',
+                            min: '0',
+                            max: '360',
+                            value: config.textRotation || 0,
+                            onChange: (e) => handleChange('textRotation', parseInt(e.target.value)),
+                            className: 'slider'
+                        })
+                    ),
+                    
+                    // Text Shadow Toggle
+                    React.createElement('div', null,
+                        React.createElement('label', { className: 'block text-sm font-medium text-gray-700 mb-2' }, '文字阴影'),
+                        React.createElement('div', { className: 'flex items-center space-x-3' },
+                            React.createElement('button', {
+                                onClick: () => handleChange('textShadow', !config.textShadow),
+                                className: `relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                                    config.textShadow ? 'bg-blue-600' : 'bg-gray-200'
+                                }`
+                            },
+                                React.createElement('span', {
+                                    className: `inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        config.textShadow ? 'translate-x-6' : 'translate-x-1'
+                                    }`
+                                })
+                            ),
+                            React.createElement('span', { className: 'text-sm text-gray-600' },
+                                config.textShadow ? '开启阴影' : '关闭阴影'
+                            )
+                        ),
+                        React.createElement('p', { className: 'text-xs text-gray-500 mt-1' },
+                            '文字阴影可以增强文字可读性，但也可能影响美观'
+                        )
+                    )
+                )
+            );
+        };
+
+        // Image processing functions
+        const processImagesWithWatermark = async (files, config) => {
+            const processedImages = [];
+            
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                try {
+                    const processedImage = await processImageWithWatermark(file, config);
+                    processedImages.push(processedImage);
+                } catch (error) {
+                    console.error(`Error processing ${file.name}:`, error);
+                    processedImages.push({
+                        originalName: file.name,
+                        url: null,
+                        error: true
+                    });
+                }
+            }
+            
+            return processedImages;
+        };
+
+        const processImageWithWatermark = (file, config) => {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                img.onload = async () => {
+                    try {
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        
+                        ctx.drawImage(img, 0, 0);
+                        
+                        await applyWatermark(ctx, img.width, img.height, config);
+                        
+                        canvas.toBlob((blob) => {
+                            if (blob) {
+                                const url = URL.createObjectURL(blob);
+                                resolve({
+                                    originalName: file.name,
+                                    url: url,
+                                    blob: blob,
+                                    error: false
+                                });
+                            } else {
+                                reject(new Error('Failed to create blob'));
+                            }
+                        }, file.type || 'image/png', 0.9);
+                        
+                    } catch (error) {
+                        reject(error);
+                    }
+                };
+                
+                img.onerror = () => {
+                    reject(new Error(`Failed to load image: ${file.name}`));
+                };
+                
+                img.src = URL.createObjectURL(file);
+            });
+        };
+
+        const applyWatermark = async (ctx, width, height, config) => {
+            const { watermarkType } = config;
+            
+            console.log('Applying watermark with type:', watermarkType);
+            console.log('Canvas size:', width, 'x', height);
+            console.log('Config:', config);
+            
+            // Apply text watermark
+            if (watermarkType === 'text' || watermarkType === 'both') {
+                console.log('Applying text watermark...');
+                applyTextWatermark(ctx, width, height, config);
+                console.log('Text watermark applied');
+            }
+            
+            // Apply logo watermark
+            if ((watermarkType === 'logo' || watermarkType === 'both') && config.logoFile) {
+                console.log('Applying logo watermark...');
+                await applyLogoWatermark(ctx, width, height, config);
+                console.log('Logo watermark applied');
+            } else if (watermarkType === 'logo' || watermarkType === 'both') {
+                console.log('Logo watermark skipped - no logo file');
+            }
+            
+            console.log('Watermark application complete');
+        };
+
+        const applyTextWatermark = (ctx, width, height, config) => {
+            const { text, fontSize, opacity, position, color, offsetX, offsetY, textDistribution, textSpacing, textRotation, textShadow } = config;
+            
+            ctx.font = `${fontSize}px Microsoft YaHei, Arial, sans-serif`;
+            ctx.fillStyle = color;
+            ctx.globalAlpha = opacity;
+            
+            const textMetrics = ctx.measureText(text);
+            const textWidth = textMetrics.width;
+            const textHeight = fontSize;
+            
+            // Add text shadow if enabled
+            if (textShadow) {
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+                ctx.shadowOffsetX = 2;
+                ctx.shadowOffsetY = 2;
+                ctx.shadowBlur = 4;
+            } else {
+                ctx.shadowColor = 'transparent';
+                ctx.shadowOffsetX = 0;
+                ctx.shadowOffsetY = 0;
+                ctx.shadowBlur = 0;
+            }
+            
+            if (textDistribution === 'multi') {
+                // Multi-text distribution: spread watermarks across the entire image
+                console.log('Applying multi-text watermark with spacing:', textSpacing);
+                
+                const spacingX = textSpacing;
+                const spacingY = textSpacing;
+                
+                const cols = Math.floor((width - textWidth) / spacingX) + 1;
+                const rows = Math.floor((height - textHeight) / spacingY) + 1;
+                
+                const totalWidth = (cols - 1) * spacingX + textWidth;
+                const totalHeight = (rows - 1) * spacingY + textHeight;
+                
+                const startX = (width - totalWidth) / 2;
+                const startY = textHeight + (height - totalHeight) / 2;
+                
+                console.log(`Multi-text grid: ${cols}x${rows}, starting at (${startX}, ${startY})`);
+                
+                for (let row = 0; row < rows; row++) {
+                    for (let col = 0; col < cols; col++) {
+                        const x = startX + col * spacingX;
+                        const y = startY + row * spacingY;
+                        
+                        if (x + textWidth <= width && y <= height && x >= 0 && y >= textHeight) {
+                            ctx.save();
+                            ctx.translate(x + textWidth / 2, y - textHeight / 2);
+                            const rotationAngle = textRotation !== undefined ? textRotation : -15;
+                            ctx.rotate((rotationAngle * Math.PI) / 180);
+                            ctx.fillText(text, -textWidth / 2, textHeight / 2);
+                            ctx.restore();
+                        }
+                    }
+                }
+            } else {
+                // Single text watermark - use percentage-based positioning if available, otherwise fallback to position-based
+                let x, y;
+                
+                if (config.textHorizontalPosition !== undefined && config.textVerticalPosition !== undefined) {
+                    // Use percentage-based positioning (new slider system)
+                    console.log(`Using percentage positioning for text: horizontal=${config.textHorizontalPosition}%, vertical=${config.textVerticalPosition}%`);
+                    const result = calculatePercentagePosition(
+                        width,
+                        height,
+                        textWidth,
+                        textHeight,
+                        config.textHorizontalPosition,
+                        config.textVerticalPosition,
+                        'text'
+                    );
+                    x = result.x;
+                    y = result.y;
+                    console.log(`Text watermark positioned at: x=${x}, y=${y}`);
+                } else {
+                    // Fallback to legacy position-based system
+                    console.log(`Using legacy positioning for text: position=${position}`);
+                    const { x: calcX, y: calcY } = calculateWatermarkPosition(position, width, height, textWidth, textHeight, offsetX, offsetY);
+                    x = calcX;
+                    y = calcY;
+                    console.log(`Text watermark positioned at (legacy): x=${x}, y=${y}`);
+                }
+                
+                // Apply rotation if specified
+                if (textRotation && textRotation !== 0) {
+                    ctx.save();
+                    ctx.translate(x + textWidth / 2, y - textHeight / 2);
+                    ctx.rotate((textRotation * Math.PI) / 180);
+                    ctx.fillText(text, -textWidth / 2, textHeight / 2);
+                    ctx.restore();
+                } else {
+                    ctx.fillText(text, x, y);
+                }
+            }
+            
+            ctx.shadowColor = 'transparent';
+            ctx.globalAlpha = 1;
+        };
+
+        const applyLogoWatermark = (ctx, width, height, config) => {
+            return new Promise((resolve) => {
+                const { logoFile, logoSize, logoOpacity, logoPosition, logoOffsetX, logoOffsetY, logoRotation, logoDistribution, logoSpacing } = config;
+                
+                if (!logoFile) {
+                    resolve();
+                    return;
+                }
+                
+                const logoImg = new Image();
+                logoImg.onload = () => {
+                    try {
+                        ctx.save();
+                        
+                        ctx.globalAlpha = logoOpacity;
+                        
+                        const logoAspectRatio = logoImg.width / logoImg.height;
+                        let logoWidth = logoSize;
+                        let logoHeight = logoSize / logoAspectRatio;
+                        
+                        if (logoHeight > logoSize) {
+                            logoHeight = logoSize;
+                            logoWidth = logoSize * logoAspectRatio;
+                        }
+                        
+                        ctx.imageSmoothingEnabled = true;
+                        ctx.imageSmoothingQuality = 'high';
+                        
+                        if (logoDistribution === 'multi') {
+                            // Multi-logo distribution: spread logos across the entire image
+                            console.log('Applying multi-logo watermark with spacing:', logoSpacing);
+                            
+                            const spacingX = logoSpacing;
+                            const spacingY = logoSpacing;
+                            
+                            const cols = Math.floor((width - logoWidth) / spacingX) + 1;
+                            const rows = Math.floor((height - logoHeight) / spacingY) + 1;
+                            
+                            const totalWidth = (cols - 1) * spacingX + logoWidth;
+                            const totalHeight = (rows - 1) * spacingY + logoHeight;
+                            
+                            const startX = (width - totalWidth) / 2;
+                            const startY = (height - totalHeight) / 2;
+                            
+                            console.log(`Multi-logo grid: ${cols}x${rows}, starting at (${startX}, ${startY})`);
+                            
+                            // Draw logos in a grid pattern
+                            for (let row = 0; row < rows; row++) {
+                                for (let col = 0; col < cols; col++) {
+                                    const x = startX + col * spacingX;
+                                    const y = startY + row * spacingY;
+                                    
+                                    if (x + logoWidth <= width && y + logoHeight <= height && x >= 0 && y >= 0) {
+                                        ctx.save();
+                                        
+                                        if (logoRotation !== 0) {
+                                            const centerX = x + logoWidth / 2;
+                                            const centerY = y + logoHeight / 2;
+                                            ctx.translate(centerX, centerY);
+                                            ctx.rotate((logoRotation * Math.PI) / 180);
+                                            ctx.translate(-centerX, -centerY);
+                                        }
+                                        
+                                        ctx.drawImage(logoImg, 0, 0, logoImg.width, logoImg.height, x, y, logoWidth, logoHeight);
+                                        
+                                        ctx.restore();
+                                    }
+                                }
+                            }
+                        } else {
+                            // Single logo watermark - use percentage-based positioning if available, otherwise fallback to position-based
+                            let x, y;
+                            
+                            if (config.logoHorizontalPosition !== undefined && config.logoVerticalPosition !== undefined) {
+                                // Use percentage-based positioning (new slider system)
+                                console.log(`Using percentage positioning for logo: horizontal=${config.logoHorizontalPosition}%, vertical=${config.logoVerticalPosition}%`);
+                                const result = calculatePercentagePosition(
+                                    width,
+                                    height,
+                                    logoWidth,
+                                    logoHeight,
+                                    config.logoHorizontalPosition,
+                                    config.logoVerticalPosition,
+                                    'logo'
+                                );
+                                x = result.x;
+                                y = result.y;
+                                console.log(`Logo watermark positioned at: x=${x}, y=${y}`);
+                            } else {
+                                // Fallback to legacy position-based system
+                                console.log(`Using legacy positioning for logo: position=${logoPosition}`);
+                                const { x: calcX, y: calcY } = calculateWatermarkPosition(
+                                    logoPosition,
+                                    width,
+                                    height,
+                                    logoWidth,
+                                    logoHeight,
+                                    logoOffsetX,
+                                    logoOffsetY
+                                );
+                                x = calcX;
+                                y = calcY;
+                                console.log(`Logo watermark positioned at (legacy): x=${x}, y=${y}`);
+                            }
+                            
+                            if (logoRotation !== 0) {
+                                const centerX = x + logoWidth / 2;
+                                const centerY = y + logoHeight / 2;
+                                ctx.translate(centerX, centerY);
+                                ctx.rotate((logoRotation * Math.PI) / 180);
+                                ctx.translate(-centerX, -centerY);
+                            }
+                            
+                            ctx.drawImage(logoImg, 0, 0, logoImg.width, logoImg.height, x, y, logoWidth, logoHeight);
+                        }
+                        
+                        ctx.restore();
+                        resolve();
+                    } catch (error) {
+                        console.error('Error applying logo watermark:', error);
+                        ctx.restore();
+                        resolve();
+                    }
+                };
+                
+                logoImg.onerror = () => {
+                    console.error('Failed to load logo image for watermarking');
+                    resolve();
+                };
+                
+                // Handle both preview URL and original file
+                if (logoFile.previewUrl) {
+                    logoImg.src = logoFile.previewUrl;
+                } else if (logoFile.originalFile) {
+                    logoImg.src = URL.createObjectURL(logoFile.originalFile);
+                } else {
+                    logoImg.src = URL.createObjectURL(logoFile);
+                }
+            });
+        };
+
+        // New percentage-based positioning system for precise slider control
+        const calculatePercentagePosition = (imgWidth, imgHeight, itemWidth, itemHeight, horizontalPercent, verticalPercent, itemType) => {
+            console.log(`calculatePercentagePosition called with:`, {
+                imgWidth, imgHeight, itemWidth, itemHeight, 
+                horizontalPercent, verticalPercent, itemType
+            });
+            
+            // Convert percentage (0-100) to actual position
+            // horizontalPercent: 0% = left edge, 50% = center, 100% = right edge
+            // verticalPercent: 0% = top edge, 50% = center, 100% = bottom edge
+            
+            // Calculate base position based on percentage
+            let x = Math.max(0, (imgWidth - itemWidth)) * (horizontalPercent / 100);
+            let y = Math.max(0, (imgHeight - itemHeight)) * (verticalPercent / 100);
+            
+            // For text watermarks, adjust y for baseline positioning
+            if (itemType === 'text') {
+                y = y + itemHeight; // Add font height since text is drawn from baseline
+            }
+            
+            console.log(`Calculated base position before bounds checking: x=${x}, y=${y}`);
+            
+            // Apply gentle bounds checking to prevent watermarks from going completely outside
+            if (itemType === 'logo' && itemHeight > 100) {
+                // For logos (larger items), allow more flexibility but ensure some visibility
+                x = Math.max(-itemWidth * 0.8, Math.min(x, imgWidth - itemWidth * 0.2));
+                y = Math.max(-itemHeight * 0.8, Math.min(y, imgHeight - itemHeight * 0.2));
+                console.log(`Logo bounds checking applied: x=${x}, y=${y}`);
+            } else {
+                // For text watermarks, use strict bounds checking but allow edge positioning
+                x = Math.max(0, Math.min(x, imgWidth - itemWidth));
+                
+                if (itemType === 'text') {
+                    // Ensure text baseline is properly positioned, but allow top positioning
+                    y = Math.max(itemHeight, Math.min(y, imgHeight));
+                } else {
+                    y = Math.max(0, Math.min(y, imgHeight - itemHeight));
+                }
+                
+                console.log(`Text/small item bounds checking applied: x=${x}, y=${y}`);
+            }
+            
+            console.log(`Final calculated position: x=${x}, y=${y}`);
+            return { x, y };
+        };
+
+        const calculateWatermarkPosition = (position, imgWidth, imgHeight, textWidth, textHeight, offsetX, offsetY) => {
+            let x, y;
+            
+            switch (position) {
+                case 'top-left':
+                    x = offsetX;
+                    // For logos (larger items), position from top edge; for text (smaller items), position by baseline
+                    y = textHeight > 100 ? offsetY : offsetY + textHeight;
+                    break;
+                case 'top-right':
+                    x = imgWidth - textWidth - offsetX;
+                    // For logos (larger items), position from top edge; for text (smaller items), position by baseline
+                    y = textHeight > 100 ? offsetY : offsetY + textHeight;
+                    break;
+                case 'bottom-left':
+                    x = offsetX;
+                    y = imgHeight - textHeight - offsetY;
+                    break;
+                case 'bottom-right':
+                    x = imgWidth - textWidth - offsetX;
+                    y = imgHeight - textHeight - offsetY;
+                    break;
+                case 'center':
+                    x = (imgWidth - textWidth) / 2;
+                    y = (imgHeight + textHeight) / 2;
+                    break;
+                default:
+                    x = imgWidth - textWidth - offsetX;
+                    y = imgHeight - offsetY;
+            }
+            
+            // For logos (larger items), apply looser bounds checking to maintain corner anchoring
+            if (textHeight > 100) {
+                // Only prevent logos from going completely outside the image
+                x = Math.max(-textWidth + 10, Math.min(x, imgWidth - 10));
+                y = Math.max(-textHeight + 10, Math.min(y, imgHeight - 10));
+            } else {
+                // For text watermarks, use STRICT bounds checking to never exceed image boundaries
+                
+                // Horizontal bounds checking
+                x = Math.max(0, Math.min(x, imgWidth - textWidth));
+                
+                // Vertical bounds checking with special handling for text baseline
+                // For top positions, ensure text doesn't go above image top
+                if (position === 'top-left' || position === 'top-right') {
+                    // For text at top, y represents baseline position, so minimum y should be textHeight (font size)
+                    // Also ensure we have enough offset from top edge
+                    y = Math.max(textHeight + Math.max(5, offsetY), y);
+                } else {
+                    // For other positions, ensure text fits within image bounds
+                    y = Math.max(textHeight, Math.min(y, imgHeight));
+                }
+                
+                // Final safety check: ensure the text completely fits within image boundaries
+                if (x + textWidth > imgWidth) {
+                    x = imgWidth - textWidth;
+                }
+                if (y > imgHeight) {
+                    y = imgHeight;
+                }
+                if (y < textHeight) {
+                    y = textHeight;
+                }
+            }
+            
+            return { x, y };
+        };
+
+        const downloadProcessedImages = (processedImages) => {
+            const validImages = processedImages.filter(img => img.url && !img.error);
+            
+            if (validImages.length === 0) {
+                alert('没有可下载的图片');
+                return;
+            }
+            
+            if (validImages.length > 1) {
+                const confirmed = window.confirm(
+                    `准备下载 ${validImages.length} 张处理好的图片。\n\n请注意：浏览器可能会显示多个下载提示，请选择“允许”或“全部允许”。`
+                );
+                
+                if (!confirmed) return;
+            }
+            
+            if (validImages.length === 1) {
+                const link = document.createElement('a');
+                link.download = `watermarked_${validImages[0].originalName}`;
+                link.href = validImages[0].url;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } else {
+                let downloadCount = 0;
+                
+                const downloadNext = () => {
+                    if (downloadCount >= validImages.length) {
+                        setTimeout(() => {
+                            alert(`所有 ${validImages.length} 张图片已开始下载！\n\n请检查浏览器的下载文件夹。`);
+                        }, 1000);
+                        return;
+                    }
+                    
+                    const image = validImages[downloadCount];
+                    const link = document.createElement('a');
+                    link.download = `watermarked_${image.originalName}`;
+                    link.href = image.url;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    
+                    downloadCount++;
+                    setTimeout(downloadNext, 800);
+                };
+                
+                downloadNext();
+            }
+        };
+
+        // ImageModal Component
+        const ImageModal = ({ isOpen, onClose, image, title, onDownload }) => {
+            React.useEffect(() => {
+                const handleEscape = (e) => {
+                    if (e.key === 'Escape') {
+                        onClose();
+                    }
+                };
+
+                if (isOpen) {
+                    document.addEventListener('keydown', handleEscape);
+                    document.body.style.overflow = 'hidden';
+                }
+
+                return () => {
+                    document.removeEventListener('keydown', handleEscape);
+                    document.body.style.overflow = 'unset';
+                };
+            }, [isOpen, onClose]);
+
+            if (!isOpen) return null;
+
+            return React.createElement('div', { 
+                className: 'modal-backdrop',
+                onClick: onClose
+            },
+                React.createElement('div', {
+                    className: 'modal-content',
+                    onClick: (e) => e.stopPropagation()
+                },
+                    // Header
+                    React.createElement('div', { className: 'flex items-center justify-between p-4 border-b border-gray-200' },
+                        React.createElement('div', { className: 'flex-1 min-w-0' },
+                            React.createElement('h3', { className: 'text-lg font-medium text-gray-900 truncate' }, title)
+                        ),
+                        React.createElement('div', { className: 'flex items-center space-x-2' },
+                            onDownload && React.createElement('button', {
+                                onClick: onDownload,
+                                className: 'p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors',
+                                title: '下载图片'
+                            }, '📥'),
+                            React.createElement('button', {
+                                onClick: onClose,
+                                className: 'p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors',
+                                title: '关闭'
+                            }, '✕')
+                        )
+                    ),
+                    // Image Container
+                    React.createElement('div', { className: 'flex-1 overflow-auto p-4 bg-gray-50' },
+                        React.createElement('div', { className: 'flex items-center justify-center min-h-full' },
+                            React.createElement('img', {
+                                src: image,
+                                alt: title,
+                                className: 'max-w-full max-h-full object-contain rounded-lg shadow-lg',
+                                style: { maxHeight: 'calc(90vh - 120px)' }
+                            })
+                        )
+                    ),
+                    // Footer
+                    React.createElement('div', { className: 'p-4 border-t border-gray-200 bg-gray-50' },
+                        React.createElement('div', { className: 'flex items-center justify-center text-sm text-gray-600' },
+                            React.createElement('span', null, '点击图片外部区域或按 ESC 键关闭')
+                        )
+                    )
+                )
+            );
+        };
+
+        // Main App Component
+        const App = () => {
+            const [selectedFiles, setSelectedFiles] = useState([]);
+            const [processedImages, setProcessedImages] = useState([]);
+            const [watermarkConfig, setWatermarkConfig] = useState({
+                // Text watermark settings
+                text: '水印文字',
+                fontSize: 24,
+                opacity: 0.7,
+                position: 'bottom-right',
+                color: '#ffffff',
+                offsetX: 20,
+                offsetY: 20,
+                // Multi-text distribution settings
+                textDistribution: 'single',
+                textSpacing: 300,
+                textRotation: 0,
+                textShadow: true,
+                // Text percentage-based positioning (new slider system)
+                textHorizontalPosition: 80, // 0-100%, default 80% (right side)
+                textVerticalPosition: 80, // 0-100%, default 80% (bottom side)
+                // Logo watermark settings
+                logoFile: null,
+                logoSize: 100,
+                logoOpacity: 0.8,
+                logoPosition: 'bottom-right',
+                logoOffsetX: 20,
+                logoOffsetY: 20,
+                logoRotation: 0,
+                logoDistribution: 'single',
+                logoSpacing: 150,
+                // Logo percentage-based positioning (new slider system)
+                logoHorizontalPosition: 80, // 0-100%, default 80% (right side)
+                logoVerticalPosition: 80, // 0-100%, default 80% (bottom side)
+                watermarkType: 'text' // 'text' or 'logo' or 'both'
+            });
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [modalState, setModalState] = useState({
+                isOpen: false,
+                image: null,
+                title: '',
+                onDownload: null
+            });
+
+            const openModal = (image, title, onDownload = null) => {
+                setModalState({
+                    isOpen: true,
+                    image,
+                    title,
+                    onDownload
+                });
+            };
+
+            const closeModal = () => {
+                setModalState({
+                    isOpen: false,
+                    image: null,
+                    title: '',
+                    onDownload: null
+                });
+            };
+
+            const handleFilesSelected = useCallback((files) => {
+                setSelectedFiles(files);
+                setProcessedImages([]);
+            }, []);
+
+            const handleProcessImages = async () => {
+                if (selectedFiles.length === 0) return;
+
+                setIsProcessing(true);
+                try {
+                    const processed = await processImagesWithWatermark(selectedFiles, watermarkConfig);
+                    setProcessedImages(processed);
+                } catch (error) {
+                    console.error('Error processing images:', error);
+                    alert('处理图片时出现错误，请重试');
+                } finally {
+                    setIsProcessing(false);
+                }
+            };
+
+            const handleDownloadAll = async () => {
+                if (processedImages.length === 0) return;
+                
+                const validImages = processedImages.filter(img => img.url && !img.error);
+                if (validImages.length === 0) {
+                    alert('没有可下载的已处理图片');
+                    return;
+                }
+                
+                // Show confirmation dialog
+                if (!confirmBatchDownload(validImages.length)) {
+                    return;
+                }
+                
+                try {
+                    const result = await downloadImagesAsZip(validImages, 'watermarked_images.zip');
+                    if (result.success) {
+                        showDownloadComplete(result.count);
+                    }
+                } catch (error) {
+                    console.error('Zip download error:', error);
+                    alert(`下载失败: ${error.message}`);
+                }
+            };
+
+            const handleClearAll = () => {
+                if (selectedFiles.length === 0 && processedImages.length === 0) return;
+                
+                const confirmMessage = selectedFiles.length > 0 
+                    ? `确定要清除所有 ${selectedFiles.length} 张图片吗？这将移除原图和已处理的图片。`
+                    : '确定要清除所有已处理的图片吗？';
+                
+                if (window.confirm(confirmMessage)) {
+                    processedImages.forEach(image => {
+                        if (image.url) {
+                            URL.revokeObjectURL(image.url);
+                        }
+                    });
+                    
+                    setSelectedFiles([]);
+                    setProcessedImages([]);
+                }
+            };
+
+            return React.createElement('div', { className: 'min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100' },
+                // Modal Component
+                React.createElement(ImageModal, {
+                    isOpen: modalState.isOpen,
+                    onClose: closeModal,
+                    image: modalState.image,
+                    title: modalState.title,
+                    onDownload: modalState.onDownload
+                }),
+                React.createElement('header', { className: 'bg-white shadow-sm border-b border-gray-200' },
+                    React.createElement('div', { className: 'max-w-7xl mx-auto px-6 py-4' },
+                        React.createElement('div', { className: 'flex items-center justify-between' },
+                            React.createElement('div', { className: 'flex items-center' },
+                                React.createElement('div', { className: 'flex items-center justify-center w-12 h-12 bg-blue-500 rounded-lg' },
+                                    React.createElement('svg', {
+                                        className: 'w-8 h-8 text-white',
+                                        viewBox: '0 0 24 24',
+                                        fill: 'none',
+                                        xmlns: 'http://www.w3.org/2000/svg'
+                                    }, React.createElement('path', {
+                                        d: 'M6.5 19C3.46 19 1 16.54 1 13.5C1 10.46 3.46 8 6.5 8H7C8.11 5.22 10.88 3 14 3C17.86 3 21 6.14 21 10C21 10.55 20.94 11.08 20.83 11.6C21.55 12.24 22 13.17 22 14C22 15.86 20.58 17.42 18.75 17.87C18.36 18.54 17.5 19 16.5 19H6.5Z',
+                                        stroke: 'currentColor',
+                                        strokeWidth: '2',
+                                        strokeLinejoin: 'round'
+                                    })),
+                                ),
+                                React.createElement('div', { className: 'ml-3' },
+                                    React.createElement('h1', { className: 'text-2xl font-bold text-gray-900' }, '水印大师'),
+                                    React.createElement('p', { className: 'text-sm text-gray-500' }, '批量图片加水印工具')
+                                )
+                            ),
+                            React.createElement('a', {
+                                href: 'https://7studylab.com/',
+                                target: '_blank',
+                                rel: 'noopener noreferrer',
+                                className: 'flex items-center hover:opacity-80 transition-opacity'
+                            },
+                                React.createElement('img', {
+                                    src: './src/assets/icons/108.png',
+                                    alt: '返回小铁匠',
+                                    className: 'h-8 w-8',
+                                    onError: (e) => {
+                                        e.target.style.display = 'none';
+                                        console.error('Logo image failed to load');
+                                    }
+                                }),
+                                React.createElement('span', {
+                                    className: 'text-sm font-medium text-gray-700 ml-2'
+                                }, '返回小铁匠')
+                            )
+                        )
+                    )
+                ),
+                React.createElement('main', { className: 'max-w-7xl mx-auto px-6 py-8' },
+                    React.createElement('div', { className: 'grid grid-cols-1 lg:grid-cols-3 gap-8' },
+                        React.createElement('div', { className: 'lg:col-span-2 space-y-6' },
+                            React.createElement('div', { className: 'bg-white rounded-xl shadow-sm border p-6' },
+                                React.createElement('h2', { className: 'text-lg font-semibold mb-4' }, '📁 上传图片'),
+                                React.createElement(FileUpload, {
+                                    onFilesSelected: handleFilesSelected,
+                                    selectedFiles: selectedFiles
+                                })
+                            ),
+                            selectedFiles.length > 0 && React.createElement('div', { className: 'bg-white rounded-xl shadow-sm border p-6' },
+                                React.createElement('div', { className: 'flex items-center justify-between mb-4' },
+                                    React.createElement('h2', { className: 'text-lg font-semibold' }, `🖼️ 图片预览 (${selectedFiles.length} 张)`),
+                                    React.createElement('div', { className: 'space-x-3' },
+                                        React.createElement('button', {
+                                            onClick: handleProcessImages,
+                                            disabled: isProcessing || selectedFiles.length === 0,
+                                            className: 'btn-primary'
+                                        }, isProcessing ? '处理中...' : '添加水印'),
+                                        processedImages.length > 0 && React.createElement('button', {
+                                            onClick: handleDownloadAll,
+                                            className: 'bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700',
+                                            title: '打包下载所有已处理的图片为ZIP文件'
+                                        }, `📦 打包下载 (${processedImages.filter(img => img.url && !img.error).length})`),
+                                        (selectedFiles.length > 0 || processedImages.length > 0) && React.createElement('button', {
+                                            onClick: handleClearAll,
+                                            className: 'bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 ml-2'
+                                        }, '🗑️ 清除全部')
+                                    )
+                                ),
+                                React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4' },
+                                    selectedFiles.map((file, index) => {
+                                        const processedImage = processedImages[index];
+                                        const isCurrentlyProcessing = isProcessing && !processedImage;
+                                        const isCompleted = processedImage && !processedImage.error;
+                                        const hasError = processedImage && processedImage.error;
+                                        
+                                        return React.createElement('div', { 
+                                            key: index, 
+                                            className: 'bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow' 
+                                        },
+                                            // Image Container
+                                            React.createElement('div', { className: 'relative bg-gray-50 aspect-video' },
+                                                isCurrentlyProcessing ? React.createElement('div', { className: 'w-full h-full flex items-center justify-center' },
+                                                    React.createElement('div', { className: 'text-center' },
+                                                        React.createElement('div', { className: 'text-2xl mb-2 animate-pulse' }, '⏳'),
+                                                        React.createElement('p', { className: 'text-sm text-gray-600' }, '正在添加水印...')
+                                                    )
+                                                ) : isCompleted ? React.createElement(React.Fragment, null,
+                                                    React.createElement('img', {
+                                                        src: processedImage.url,
+                                                        alt: `Watermarked ${file.name}`,
+                                                        className: 'w-full h-full object-contain clickable-image',
+                                                        onClick: () => openModal(
+                                                            processedImage.url,
+                                                            `水印处理后 - ${file.name}`,
+                                                            () => {
+                                                                const link = document.createElement('a');
+                                                                link.download = `watermarked_${processedImage.originalName}`;
+                                                                link.href = processedImage.url;
+                                                                link.click();
+                                                            }
+                                                        ),
+                                                        title: '点击放大预览'
+                                                    }),
+                                                    React.createElement('div', { className: 'absolute top-2 right-2 bg-green-500 text-white rounded-full p-1' },
+                                                        React.createElement('span', { className: 'text-xs' }, '✓')
+                                                    )
+                                                ) : hasError ? React.createElement('div', { className: 'w-full h-full flex items-center justify-center' },
+                                                    React.createElement('div', { className: 'text-center' },
+                                                        React.createElement('div', { className: 'text-red-500 text-2xl mb-2' }, '❌'),
+                                                        React.createElement('p', { className: 'text-sm text-red-600' }, '处理失败')
+                                                    )
+                                                ) : React.createElement('img', {
+                                                    src: URL.createObjectURL(file),
+                                                    alt: file.name,
+                                                    className: 'w-full h-full object-contain clickable-image',
+                                                    onClick: () => openModal(
+                                                        URL.createObjectURL(file),
+                                                        `原始图片 - ${file.name}`
+                                                    ),
+                                                    title: '点击放大预览'
+                                                })
+                                            ),
+                                            
+                                            // File Info and Actions
+                                            React.createElement('div', { className: 'p-3' },
+                                                React.createElement('div', { className: 'flex items-center justify-between' },
+                                                    React.createElement('div', { className: 'flex-1 min-w-0' },
+                                                        React.createElement('p', { className: 'text-sm font-medium text-gray-900 truncate' }, file.name),
+                                                        React.createElement('p', { className: 'text-xs text-gray-500' }, `${(file.size / 1024 / 1024).toFixed(2)} MB`)
+                                                    ),
+                                                    
+                                                    isCompleted && React.createElement('button', {
+                                                        onClick: () => {
+                                                            const link = document.createElement('a');
+                                                            link.download = `watermarked_${processedImage.originalName}`;
+                                                            link.href = processedImage.url;
+                                                            link.click();
+                                                        },
+                                                        className: 'ml-2 bg-blue-600 text-white px-3 py-1 rounded text-xs hover:bg-blue-700 transition-colors flex items-center space-x-1',
+                                                        title: '下载此图片'
+                                                    },
+                                                        React.createElement('span', { className: 'text-xs' }, '📥'),
+                                                        React.createElement('span', null, '下载')
+                                                    )
+                                                ),
+                                                
+                                                // Status Indicator
+                                                React.createElement('div', { className: 'mt-2' },
+                                                    isCurrentlyProcessing && React.createElement('div', { className: 'flex items-center space-x-2 text-blue-600' },
+                                                        React.createElement('div', { className: 'w-2 h-2 bg-blue-500 rounded-full animate-pulse' }),
+                                                        React.createElement('span', { className: 'text-xs' }, '处理中')
+                                                    ),
+                                                    isCompleted && React.createElement('div', { className: 'flex items-center space-x-2 text-green-600' },
+                                                        React.createElement('div', { className: 'w-2 h-2 bg-green-500 rounded-full' }),
+                                                        React.createElement('span', { className: 'text-xs' }, '已完成')
+                                                    ),
+                                                    hasError && React.createElement('div', { className: 'flex items-center space-x-2 text-red-600' },
+                                                        React.createElement('div', { className: 'w-2 h-2 bg-red-500 rounded-full' }),
+                                                        React.createElement('span', { className: 'text-xs' }, '处理失败')
+                                                    ),
+                                                    !processedImage && !isCurrentlyProcessing && React.createElement('div', { className: 'flex items-center space-x-2 text-gray-500' },
+                                                        React.createElement('div', { className: 'w-2 h-2 bg-gray-400 rounded-full' }),
+                                                        React.createElement('span', { className: 'text-xs' }, '等待处理')
+                                                    )
+                                                )
+                                            )
+                                        );
+                                    })
+                                ),
+                                
+                                // Processing Progress
+                                isProcessing && React.createElement('div', { className: 'bg-blue-50 border border-blue-200 rounded-lg p-4 mt-4' },
+                                    React.createElement('div', { className: 'flex items-center space-x-3' },
+                                        React.createElement('div', { className: 'text-xl animate-spin' }, '⏳'),
+                                        React.createElement('div', { className: 'flex-1' },
+                                            React.createElement('p', { className: 'text-sm font-medium text-blue-700' }, '正在批量处理图片...'),
+                                            React.createElement('div', { className: 'w-full bg-blue-200 rounded-full h-2 mt-2' },
+                                                React.createElement('div', {
+                                                    className: 'bg-blue-500 h-2 rounded-full transition-all duration-300',
+                                                    style: { width: `${(processedImages.length / selectedFiles.length) * 100}%` }
+                                                })
+                                            ),
+                                            React.createElement('p', { className: 'text-xs text-blue-600 mt-1' }, `进度: ${processedImages.length} / ${selectedFiles.length} 张图片`)
+                                        )
+                                    )
+                                ),
+                                
+                                // Success Message
+                                processedImages.length > 0 && processedImages.length === selectedFiles.length && !isProcessing && React.createElement('div', { className: 'bg-green-50 border border-green-200 rounded-lg p-4 mt-4' },
+                                    React.createElement('div', { className: 'flex items-center space-x-2' },
+                                        React.createElement('span', { className: 'text-green-500 text-lg' }, '✓'),
+                                        React.createElement('p', { className: 'text-sm font-medium text-green-700' }, `批量处理完成！成功处理 ${processedImages.filter(img => !img.error).length} 张图片`,
+                                            processedImages.filter(img => img.error).length > 0 && React.createElement('span', { className: 'text-red-600 ml-2' }, `(${processedImages.filter(img => img.error).length} 张失败)`)
+                                        )
+                                    )
+                                )
+                            )
+                        ),
+                        React.createElement('div', { className: 'space-y-6' },
+                            React.createElement('div', { className: 'bg-white rounded-xl shadow-sm border p-6' },
+                                React.createElement('h2', { className: 'text-lg font-semibold mb-4' }, '⚙️ 水印设置'),
+                                React.createElement(WatermarkConfig, {
+                                    config: watermarkConfig,
+                                    onChange: setWatermarkConfig
+                                })
+                            ),
+                            React.createElement('div', { className: 'bg-white rounded-xl shadow-sm border p-6' },
+                                React.createElement('h3', { className: 'font-semibold mb-3' }, '💡 使用提示'),
+                                React.createElement('ul', { className: 'text-sm text-gray-600 space-y-2' },
+                                    React.createElement('li', null, '• 支持 JPG、PNG、WebP 格式'),
+                                    React.createElement('li', null, '• 可同时处理多张图片'),
+                                    React.createElement('li', null, '• 支持拖拽上传'),
+                                    React.createElement('li', null, '• 可自定义水印位置和透明度'),
+                                    React.createElement('li', null, '• 处理后可批量下载')
+                                )
+                            )
+                        )
+                    )
+                )
+            );
+        };
+
+        ReactDOM.render(React.createElement(App), document.getElementById('root'));
+    </script>
+</body>
+</html>
